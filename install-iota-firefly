@@ -1,0 +1,135 @@
+#!/bin/bash
+
+set -ueo pipefail
+
+IOTA_URL=firefly.iota.org
+GITHUB_ORG=iotaledger
+GITHUB_REPO=firefly
+
+TEMPFILE=$(tempfile)
+pgp_signature=$(tempfile)
+verify_output=$(tempfile)
+cleanup() {
+  rm -f $TEMPFILE
+  rm -f $pgp_signature
+  rm -f $verify_output
+}
+
+trap cleanup exit
+
+fail() {
+  echo
+  echo >&2 "WARNING: failed to verify AppImage."
+  echo -e >&2 $1
+  exit 1
+}		
+
+query_github_release() {
+  curl -s https://api.github.com/repos/${GITHUB_ORG}/${GITHUB_REPO}/releases/latest
+}
+cached_github_release=$(query_github_release)
+
+github_release() {
+  echo "$cached_github_release"
+}
+
+github_urls() {
+  github_release |\
+    awk '/browser_download_url/{print $2}' |\
+    tr -d '"'
+}
+
+github_checksum() {
+  github_release |\
+  jq -r .body |\
+  sed '0,/### File Hashes/d' |\
+  awk -F'[ |]*' '/AppImage/{print $4}'
+}
+
+github_release_name="$(github_release | jq .name)"
+github_release_url="$(github_release | jq .html_url)"
+
+github_release_checksum=$(github_checksum)
+github_appimage_url=$(github_urls | grep AppImage | grep -v \.asc)
+github_pgp_url=$(github_urls | grep \.asc)
+
+appimage_filename=$(awk <<<$github_appimage_url -F/ '{print $(NF)}')
+
+echo "----------------------"
+echo "IOTA Firefly Installer"
+echo "----------------------"
+echo
+echo "Project url: https://${IOTA_URL}"
+echo "Github repo: https://github.com/${GITHUB_ORG}/${GITHUB_REPO}.git"
+echo "  latest release name: $github_release_name"
+echo "  release URL: $github_release_url"
+echo "  AppImage: $github_appimage_url"
+echo "  PGP signature: $github_pgp_url"
+echo "  sha256 checksum: $github_release_checksum"
+
+echo "Downloading github appimage binary..."
+if curl -L $github_appimage_url -o $TEMPFILE; then
+  echo "OK"
+else
+  fail "failed to download latest github release binary"
+fi
+
+echo "Downloading github PGP signature..."
+if curl -L $github_pgp_url -o $pgp_signature; then
+  echo "OK"
+else
+  fail "failed to download PGP signature"
+fi
+
+echo -n "Calculating checksum of github release binary..."
+calculated_checksum="$(sha256sum $TEMPFILE | awk '{print $1}')"
+echo "OK"
+
+echo "Checksums:"
+echo "calculated:      $calculated_checksum"
+echo "github release:  $github_release_checksum"
+
+echo -n "Verifying calculated checksum against github release metadata..."
+if [ "$calculated_checksum" = "$github_release_checksum" ]; then
+  echo "OK"
+else
+  fail "Calculated checksum mismatches github release metadata"
+fi
+
+remove_public_key() {
+  sed 's/ public key / /'
+}
+
+echo -n "Importing firefly PGP key..."
+expected_import_message='gpg: key 46A440CCE5664A64: public key "IOTA Foundation (IOTA Foundation Identity) <contact@iota.org>"'
+key_import=$(gpg 2>&1 --keyserver keyserver.ubuntu.com --recv 466385BD0B40D9550F93C04746A440CCE5664A64)
+import_message=$(sed <<<$key_import -n '/gpg: key/s/\(.*\) not changed$/\1/p')
+expected=$(remove_public_key <<<$expected_import_message)
+received=$(remove_public_key <<<$import_message)
+if [ "$received" = "$expected" ]; then
+  echo "OK"
+else
+  echo >&2 "$key_import"
+  fail "PGP key import produced unexpected output"
+fi
+
+echo "Verifying PGP signature..."
+gpg 2>$verify_output --verify $pgp_signature $TEMPFILE
+good_signature='gpg: Good signature from "IOTA Foundation (IOTA Foundation Identity) <contact@iota.org>"'
+if ! grep "$good_signature" $verify_output; then
+  cat >&2 $verify_output
+  fail "PGP code signature verification failed."
+fi
+
+echo "$appimage_filename verifies OK"
+
+INSTALL_PATH=~/Desktop/${appimage_filename}
+echo -n "Installing to ${INSTALL_PATH}..."
+if cp $TEMPFILE ${INSTALL_PATH}; then
+  chmod +x ${INSTALL_PATH}
+  echo "OK"
+else
+  fail "copy failed"
+fi
+
+exit 0
