@@ -5,6 +5,7 @@ set -ueo pipefail
 IOTA_URL=firefly.iota.org
 GITHUB_ORG=iotaledger
 GITHUB_REPO=firefly
+GITHUB_RELEASE=tags/desktop-1.7.2
 
 TEMPFILE=$(mktemp)
 pgp_signature=$(mktemp)
@@ -24,12 +25,14 @@ fail() {
   exit 1
 }		
 
-which jq || fail "jq requirement not found"
+which jq >/dev/null || fail "jq requirement not found"
+
 
 query_github_release() {
-  curl -s https://api.github.com/repos/${GITHUB_ORG}/${GITHUB_REPO}/releases/latest
+  curl -s https://api.github.com/repos/${GITHUB_ORG}/${GITHUB_REPO}/releases/${GITHUB_RELEASE}
 }
 cached_github_release=$(query_github_release)
+
 
 github_release() {
   echo "$cached_github_release"
@@ -50,7 +53,6 @@ github_checksum() {
 
 github_release_name="$(github_release | jq .name)"
 github_release_url="$(github_release | jq .html_url)"
-
 github_release_checksum=$(github_checksum)
 github_appimage_url=$(github_urls | grep AppImage | grep -v \.asc)
 github_pgp_url=$(github_urls | grep \.asc)
@@ -133,5 +135,7 @@ if cp $TEMPFILE ${INSTALL_PATH}; then
 else
   fail "copy failed"
 fi
+
+chmod +x ${INSTALL_PATH}
 
 exit 0
